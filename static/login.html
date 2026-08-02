@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#121212">
+<title>MusicFlow - 登录</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --bg: #121212;
+  --card: #1e1e32;
+  --text: #e0e0e0;
+  --text2: #a0a0b8;
+  --accent: #ff4757;
+  --border: #2a2a40;
+  --radius: 14px;
+}
+
+html, body {
+  height: 100%; width: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-tap-highlight-color: transparent;
+  -webkit-font-smoothing: antialiased;
+}
+
+.container {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  padding-top: calc(var(--safe-top) + 60px);
+}
+
+.logo {
+  font-size: 56px;
+  margin-bottom: 12px;
+}
+
+.title {
+  font-size: 28px;
+  font-weight: 800;
+  background: linear-gradient(135deg, var(--accent), #ff6b81);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 4px;
+}
+
+.subtitle {
+  font-size: 14px;
+  color: var(--text2);
+  margin-bottom: 48px;
+}
+
+.input-group {
+  width: 100%; max-width: 320px;
+}
+
+.input-label {
+  font-size: 13px; font-weight: 600;
+  color: var(--text2); margin-bottom: 8px;
+}
+
+.input-wrap {
+  display: flex; gap: 8px;
+  background: var(--card); border-radius: var(--radius);
+  padding: 4px; border: 1px solid var(--border);
+  transition: border-color 0.2s;
+}
+.input-wrap:focus-within { border-color: var(--accent); }
+
+.input-wrap input {
+  flex: 1; height: 48px; background: transparent;
+  border: none; color: var(--text); font-size: 16px;
+  padding: 0 12px; outline: none;
+  font-family: monospace; letter-spacing: 1px;
+}
+.input-wrap input::placeholder { color: #404060; font-family: -apple-system, sans-serif; letter-spacing: 0; }
+
+.btn {
+  height: 48px; padding: 0 20px; border-radius: var(--radius);
+  background: var(--accent); color: #fff; border: none;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.15s, opacity 0.2s;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn:active { transform: scale(0.95); }
+.btn:disabled { opacity: 0.5; }
+
+.error-msg {
+  margin-top: 12px; font-size: 13px; color: var(--accent);
+  text-align: center; min-height: 20px;
+}
+
+.help-text {
+  margin-top: 40px; font-size: 12px; color: var(--muted);
+  text-align: center; line-height: 1.6; color: #505068;
+}
+
+.help-text code {
+  background: var(--card); padding: 2px 8px;
+  border-radius: 4px; font-size: 11px;
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="logo">🔐</div>
+  <div class="title">MusicFlow</div>
+  <div class="subtitle">请输入访问密码</div>
+
+  <div class="input-group">
+    <div class="input-label">安全密钥</div>
+    <div class="input-wrap">
+      <input type="password" id="tokenInput" placeholder="输入密钥..." autocomplete="off" autocorrect="off" autocapitalize="off">
+      <button class="btn" id="submitBtn" onclick="doLogin()">进入</button>
+    </div>
+    <div class="error-msg" id="errorMsg"></div>
+  </div>
+
+  <div class="help-text">
+    此密钥在服务器启动时自动生成<br>
+    可在 Mac 终端运行 <code>cat data/.secret_key</code> 查看
+  </div>
+</div>
+
+<script>
+const input = document.getElementById('tokenInput');
+const btn = document.getElementById('submitBtn');
+const error = document.getElementById('errorMsg');
+
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') doLogin();
+});
+
+// Check if already logged in via cookie
+fetch('/api/ping').then(r => {
+  if (r.ok) r.json().then(d => {
+    if (d.ok && !d.need_auth) {
+      window.location.href = '/';
+    }
+  });
+}).catch(() => {});
+
+async function doLogin() {
+  const token = input.value.trim();
+  if (!token) {
+    error.textContent = '请输入密钥';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = '验证中...';
+  error.textContent = '';
+
+  try {
+    const resp = await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token })
+    });
+    const data = await resp.json();
+
+    if (data.ok) {
+      window.location.href = '/';
+    } else {
+      error.textContent = '密钥错误，请重试';
+      input.value = '';
+      input.focus();
+    }
+  } catch (e) {
+    error.textContent = '网络错误，请重试';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '进入';
+  }
+}
+
+// Auto-focus
+setTimeout(() => input.focus(), 500);
+</script>
+</body>
+</html>

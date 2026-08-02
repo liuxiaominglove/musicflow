@@ -1,0 +1,6 @@
+{
+  "name": "smart-music-player",
+  "version": "1.0.0",
+  "description": "智能音乐播放器 - 桌面版",
+  "main": "main.js"
+}

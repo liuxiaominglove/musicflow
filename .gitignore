@@ -1,0 +1,44 @@
+# ============================================
+# MusicFlow - Git 忽略规则
+# ============================================
+
+# 歌曲文件（仅保留歌曲名称清单，不上传 mp3）
+music_library/
+*.mp3
+*.flac
+*.wav
+*.m4a
+*.ogg
+*.opus
+*.aac
+
+# 敏感数据
+data/.secret_key
+data/ratings.json
+data/song_meta.json
+data/schedule.json
+.secret_key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+
+# Mac 系统文件
+.DS_Store
+Thumbs.db
+
+# 备份文件
+*.bak
+*.backup
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node
+node_modules/
