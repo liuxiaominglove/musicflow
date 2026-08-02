@@ -11,7 +11,11 @@ import json
 import secrets
 import hashlib
 import functools
-from pypinyin import lazy_pinyin, Style
+try:
+    from pypinyin import lazy_pinyin, Style
+    _HAS_PYPINYIN = True
+except ImportError:
+    _HAS_PYPINYIN = False
 
 # ── Upnet VPN 代理配置 ──
 _UPNET_HTTP_PORT = "29758"
@@ -30,6 +34,8 @@ def _to_pinyin(text):
     """将中文文本转为拼音（小写无空格），非中文原样保留"""
     if not text:
         return ""
+    if not _HAS_PYPINYIN:
+        return text.lower().replace(" ", "")
     return "".join(lazy_pinyin(text, style=Style.NORMAL)).lower().replace(" ", "")
 import time
 import threading
