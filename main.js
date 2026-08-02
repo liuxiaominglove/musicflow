@@ -79,6 +79,14 @@ function startFlaskServer() {
       : path.join(DATA_DIR, 'venv', 'bin', 'python3');
     if (fs.existsSync(venvPython)) {
       finalPython = venvPython;
+    } else if (process.platform === 'darwin') {
+      // macOS: GUI 应用 PATH 不含 /usr/local/bin，需显式指定完整路径
+      const candidates = [
+        '/usr/local/bin/python3.13',
+        '/usr/local/bin/python3',
+        '/usr/bin/python3'
+      ];
+      finalPython = candidates.find(p => fs.existsSync(p)) || 'python3';
     } else {
       finalPython = process.platform === 'win32' ? 'python' : 'python3';
     }
