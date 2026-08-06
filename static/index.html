@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Electron - 智能音乐播放器</title>
+<title>MusicFlow</title>
 <style>
 /* ============================================
    全局样式 - 暗色主题（参考QQ音乐/酷狗风格）
@@ -1730,6 +1730,7 @@ if (isDesktopApp) {
 }
 
 let allSongs = [];
+let allTags = [];  // 所有标签（含空标签），供侧栏/右键菜单/下拉使用
 let reviewMode = false;
 let currentFilter = 'all';
 let currentFilterValue = '';
@@ -1882,14 +1883,11 @@ function showContextMenu(e, relPath, name, artist) {
   contextMenuTarget = { path: relPath, name: name, artist: artist || '' };
   const menu = document.getElementById('contextMenu');
 
-  // 动态构建标签子菜单
+  // 动态构建标签子菜单（用 allTags：包含空标签，与侧栏一致）
   const submenu = document.getElementById('ctxTagSubmenu');
-  const tags = allSongs.reduce((acc, s) => {
-    if (!acc.includes(s.tag)) acc.push(s.tag);
-    return acc;
-  }, []);
+  const tags = allTags.length ? allTags : ['default'];
   submenu.innerHTML = tags.map(t =>
-    `<div class="submenu-item" onclick="moveSongToTag('${escapeHtml(relPath)}', '${escapeHtml(t)}')">
+    `<div class="submenu-item" data-rel-path="${escapeHtml(relPath)}" data-tag="${escapeHtml(t)}">
       📁 ${escapeHtml(t)}
     </div>`
   ).join('') + `
@@ -1898,6 +1896,9 @@ function showContextMenu(e, relPath, name, artist) {
              onkeydown="if(event.key==='Enter'){moveSongToNewTag(event);event.preventDefault();}"
              onclick="event.stopPropagation()">
     </div>`;
+  submenu.querySelectorAll('.submenu-item[data-tag]').forEach(el => {
+    el.addEventListener('click', () => moveSongToTag(el.dataset.relPath, el.dataset.tag));
+  });
 
   menu.style.left = e.clientX + 'px';
   menu.style.top = e.clientY + 'px';
@@ -1946,7 +1947,10 @@ async function doSearch() {
   grid.innerHTML = '<div style="text-align:center;padding:60px;grid-column:1/-1;"><div class="spinner"></div><div style="margin-top:12px;color:var(--text-muted)">正在搜索本地库 + 在线...</div></div>';
 
   let html = '';
-  let debugHtml = '<div style="grid-column:1/-1;background:#222;padding:8px 12px;border-radius:6px;margin-bottom:12px;font-size:11px;font-family:monospace;color:#f00;">⚠️ 搜索未执行</div>';
+  // Debug 信息仅本地访问 + ?debug=1 时显示
+  const showDebug = (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')
+    && new URLSearchParams(window.location.search).has('debug');
+  let debugHtml = '';
 
   // 搜索本地库 + 在线（根据工具栏来源选择）
   try {
@@ -1993,7 +1997,7 @@ async function doSearch() {
               <div class="result-meta">📁 ${escapeHtml(r.tag)} · ${r.size_mb}MB ${r.rating > 0 ? '· ' + '★'.repeat(r.rating) : ''}</div>
             </div>
             <div class="result-actions">
-              <button class="btn-play" onclick="event.stopPropagation();playSongById('${r.rel_path}');closeSearch();">▶ 播放</button>
+              <button class="btn-play" data-rel-path="${escapeHtml(r.rel_path)}">▶ 播放</button>
             </div>
           </div>
         `).join('');
@@ -2005,13 +2009,12 @@ async function doSearch() {
           <span style="font-size:15px;font-weight:600;color:var(--accent-light);">🌐 在线搜索 (${onlineSongs.length}首)</span>
         </div>`;
         html += onlineSongs.map(r => {
-          const safeTitle = escapeHtml(r.title).replace(/'/g, "\\'");
           const isLocal = alreadyLocalIds.has(r.id);
           const localBadge = isLocal ? '<span style="font-size:10px;background:var(--green);color:#000;padding:2px 6px;border-radius:4px;margin-left:6px;">✓ 已下载</span>' : '';
           const downloadBtn = isLocal
-            ? `<button class="btn-play" onclick="event.stopPropagation();downloadAndPlay('${r.id}', '${safeTitle}')">▶ 播放</button>`
-            : `<button class="btn-download" id="dl-${r.id}" onclick="event.stopPropagation();downloadSong('${r.id}', '${safeTitle}')">⬇ 下载</button>
-               <button class="btn-play" onclick="event.stopPropagation();downloadAndPlay('${r.id}', '${safeTitle}')">▶</button>`;
+            ? `<button class="btn-play" data-video-id="${escapeHtml(r.id)}" data-title="${escapeHtml(r.title)}">▶ 播放</button>`
+            : `<button class="btn-download" id="dl-${r.id}" data-video-id="${escapeHtml(r.id)}" data-title="${escapeHtml(r.title)}">⬇ 下载</button>
+               <button class="btn-play" data-video-id="${escapeHtml(r.id)}" data-title="${escapeHtml(r.title)}">▶</button>`;
           return `
           <div class="search-result-card" style="${isLocal ? 'opacity:0.7;' : ''}">
             <img class="result-thumb" src="${r.thumbnail || ''}" onerror="this.style.display='none'" alt="">
@@ -2039,7 +2042,17 @@ async function doSearch() {
   }
 
   try {
-    grid.innerHTML = debugHtml + html;
+    grid.innerHTML = (showDebug ? debugHtml : '') + html;
+    // Event listeners for search result buttons
+    grid.querySelectorAll('.btn-play[data-rel-path]').forEach(btn => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); playSongById(btn.dataset.relPath); closeSearch(); });
+    });
+    grid.querySelectorAll('.btn-download[data-video-id]').forEach(btn => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); downloadSong(btn.dataset.videoId, btn.dataset.title); });
+    });
+    grid.querySelectorAll('.btn-play[data-video-id]').forEach(btn => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); downloadAndPlay(btn.dataset.videoId, btn.dataset.title); });
+    });
   } catch (renderErr) {
     grid.innerHTML = `<div style="grid-column:1/-1;padding:40px;color:#f00;">渲染失败: ${escapeHtml(String(renderErr))}</div>`;
   }
@@ -2091,7 +2104,7 @@ async function downloadSong(videoId, title) {
 }
 
 async function downloadAndPlay(videoId, title) {
-  const btn = event.target;
+  const btn = document.querySelector(`.btn-play[data-video-id="${videoId}"]`);
   const quality = document.getElementById('searchQuality').value;
   const tag = document.getElementById('searchTag').value || 'default';
   btn.textContent = '⏳';
@@ -2190,6 +2203,7 @@ async function loadLibrary() {
     if (!data.ok) return;
 
     allSongs = data.songs;
+    allTags = data.tags || [];
 
     // 更新计数
     updateSidebarCounts(data);
@@ -2218,11 +2232,87 @@ function updateSidebarCounts(data) {
 function renderTagList(tags) {
   const container = document.getElementById('tagList');
   container.innerHTML = tags.map(t =>
-    `<div class="sidebar-item" onclick="filterBy('tag', '${t}')" data-filter="tag${t}">
+    `<div class="sidebar-item tag-item" draggable="true"
+         data-filter="tag${t}"
+         data-tag="${escapeHtml(t)}"
+         ondragstart="tagDragStart(event)" ondragover="tagDragOver(event)"
+         ondragend="tagDragEnd(event)" ondrop="tagDrop(event)">
       <span class="icon">📁</span> ${t}
       <span class="count">${allSongs.filter(s => s.tag === t).length}</span>
+      <span class="drag-handle" style="float:right;opacity:0.4;font-size:10px;cursor:grab;">⠿</span>
     </div>`
   ).join('');
+  container.querySelectorAll('.tag-item').forEach(el => {
+    el.addEventListener('click', () => filterBy('tag', el.dataset.tag));
+  });
+}
+
+// ============================================
+// 标签拖拽排序
+// ============================================
+let _dragTag = null;
+
+function tagDragStart(e) {
+  _dragTag = e.currentTarget.dataset.tag;
+  e.currentTarget.style.opacity = '0.5';
+  // Firefox 需要设置数据才能触发 drag
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', _dragTag);
+}
+
+function tagDragOver(e) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+}
+
+function tagDragEnd(e) {
+  e.currentTarget.style.opacity = '';
+  _dragTag = null;
+}
+
+function tagDrop(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const targetTag = e.currentTarget.dataset.tag;
+  if (!_dragTag || _dragTag === targetTag) {
+    e.currentTarget.style.opacity = '';
+    return;
+  }
+  const container = document.getElementById('tagList');
+  const items = [...container.querySelectorAll('.tag-item')];
+  const dragIdx = items.findIndex(el => el.dataset.tag === _dragTag);
+  const targetIdx = items.findIndex(el => el.dataset.tag === targetTag);
+  if (dragIdx === -1 || targetIdx === -1) {
+    e.currentTarget.style.opacity = '';
+    return;
+  }
+  // 生成新顺序
+  const newOrder = items.map(el => el.dataset.tag);
+  newOrder.splice(dragIdx, 1);
+  newOrder.splice(targetIdx, 0, _dragTag);
+  // 立即更新界面
+  saveTagOrder(newOrder);
+  // 更新本地 allTags 并重新渲染
+  allTags = newOrder;
+  renderTagList(newOrder);
+}
+
+async function saveTagOrder(order) {
+  try {
+    const resp = await fetch(`${API}/api/tags/order`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('标签顺序已保存', 'success');
+    } else {
+      showToast(data.error || '保存顺序失败', 'error');
+    }
+  } catch (e) {
+    showToast('保存顺序失败: ' + e.message, 'error');
+  }
 }
 
 function populateSearchTags(tags) {
@@ -2282,7 +2372,7 @@ function toggleReviewMode() {
 }
 
 async function reviewConfirm(relPath, nameInput, artistInput) {
-  const btn = event.target;
+  const btn = nameInput.closest('.song-item').querySelector('.song-review-confirm');
   const name = nameInput.value.trim();
   const artist = artistInput.value.trim();
 
@@ -2394,10 +2484,13 @@ async function searchSongCandidate(relPath, idSuffix) {
             <div class="search-result-name">${escapeHtml(c.name)}</div>
             ${c.artist ? `<div class="search-result-artist">${escapeHtml(c.artist)}</div>` : ''}
           </div>
-          <button class="search-result-pick" onclick="event.stopPropagation();pickSearchResult('${idSuffix}', '${escapeHtml(c.name).replace(/'/g, "\\'")}', '${escapeHtml(c.artist || '').replace(/'/g, "\\'")}')">选用</button>
+          <button class="search-result-pick" data-id-suffix="${idSuffix}" data-name="${escapeHtml(c.name)}" data-artist="${escapeHtml(c.artist || '')}">选用</button>
         </div>
       `).join('')}
     `;
+    resultBox.querySelectorAll('.search-result-pick').forEach(btn => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); pickSearchResult(btn.dataset.idSuffix, btn.dataset.name, btn.dataset.artist); });
+    });
   } catch (e) {
     resultBox.innerHTML = '<div class="search-no-result">网络错误，请重试</div>';
   }
@@ -2471,10 +2564,13 @@ async function recognizeSongById(relPath, idSuffix) {
             <div class="search-result-name">${escapeHtml(c.name)}</div>
             ${c.artist ? `<div class="search-result-artist">${escapeHtml(c.artist)}</div>` : ''}
           </div>
-          <button class="search-result-pick" onclick="event.stopPropagation();pickRecoResult('${idSuffix}', '${escapeHtml(c.name).replace(/'/g, "\\'")}', '${escapeHtml(c.artist || '').replace(/'/g, "\\'")}')">选用</button>
+          <button class="search-result-pick" data-id-suffix="${idSuffix}" data-name="${escapeHtml(c.name)}" data-artist="${escapeHtml(c.artist || '')}">选用</button>
         </div>
       `).join('')}
     `;
+    resultBox.querySelectorAll('.search-result-pick').forEach(btn => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); pickRecoResult(btn.dataset.idSuffix, btn.dataset.name, btn.dataset.artist); });
+    });
   } catch (e) {
     resultBox.innerHTML = '<div class="search-no-result">⚠️ 请求超时，请重试</div>';
   }
@@ -2545,16 +2641,16 @@ function applyFilter() {
       return `
         <div class="song-item ${isPlaying ? 'playing' : ''}" style="position:relative;flex-wrap:wrap;">
           <div class="song-index">${i + 1}</div>
-          <div class="song-cover" onclick="reviewPlayPreview('${s.rel_path}')" title="点击试听">🔊</div>
+          <div class="song-cover" data-rel-path="${escapeHtml(s.rel_path)}" title="点击试听">🔊</div>
           <div class="song-review-row">
             <input class="song-review-input" id="reviewName_${idSuffix}" value="${escapeHtml(s.name)}" placeholder="歌名" onclick="event.stopPropagation()">
             <input class="song-review-input song-review-artist" id="reviewArtist_${idSuffix}" value="${escapeHtml(s.artist || '')}" placeholder="歌手(可选)" onclick="event.stopPropagation()">
             <span class="song-tag">${escapeHtml(s.tag)}</span>
           </div>
-          <button class="song-review-btn song-review-search" id="btnSearch_${idSuffix}" onclick="event.stopPropagation();searchSongCandidate('${s.rel_path}', '${idSuffix}')" title="联网搜索正确歌名">🔍</button>
-          <button class="song-review-btn song-review-shazam" id="btnReco_${idSuffix}" onclick="event.stopPropagation();recognizeSongById('${s.rel_path}', '${idSuffix}')" title="Shazam 听歌识曲">🎵</button>
-          <button class="song-review-btn song-review-confirm" onclick="reviewConfirm('${s.rel_path}', document.getElementById('reviewName_${idSuffix}'), document.getElementById('reviewArtist_${idSuffix}'))">✓ 确认</button>
-          <button class="song-review-btn song-review-skip" onclick="reviewSkipToNext('${s.rel_path}')">跳过 ▸</button>
+          <button class="song-review-btn song-review-search" id="btnSearch_${idSuffix}" data-rel-path="${escapeHtml(s.rel_path)}" data-id-suffix="${idSuffix}" title="联网搜索正确歌名">🔍</button>
+          <button class="song-review-btn song-review-shazam" id="btnReco_${idSuffix}" data-rel-path="${escapeHtml(s.rel_path)}" data-id-suffix="${idSuffix}" title="Shazam 听歌识曲">🎵</button>
+          <button class="song-review-btn song-review-confirm" data-rel-path="${escapeHtml(s.rel_path)}" title="确认">✓ 确认</button>
+          <button class="song-review-btn song-review-skip" data-rel-path="${escapeHtml(s.rel_path)}" title="跳过">跳过 ▸</button>
           <div class="search-results" id="${resultBoxId}"></div>
           <div class="search-results" id="${recoResultId}"></div>
         </div>`;
@@ -2563,34 +2659,98 @@ function applyFilter() {
     // 正常模式
     const stars = [1,2,3].map(r =>
       `<span class="star ${s.rating >= r ? 'active' : ''}"
-             onclick="event.stopPropagation();rateSong('${s.rel_path}', ${s.rating === r ? 0 : r})"
+             data-rel-path="${escapeHtml(s.rel_path)}" data-rating="${s.rating === r ? 0 : r}"
              title="${r}星">★</span>`
     ).join('');
 
     return `
-      <div class="song-item ${isPlaying ? 'playing' : ''}" oncontextmenu="showContextMenu(event, '${s.rel_path}', '${escapeHtml(s.name)}', '${escapeHtml(s.artist || '')}')">
+      <div class="song-item ${isPlaying ? 'playing' : ''}" data-rel-path="${escapeHtml(s.rel_path)}" data-song-name="${escapeHtml(s.name)}" data-song-artist="${escapeHtml(s.artist || '')}">
         <div class="song-index">${i + 1}</div>
-        <div class="song-cover" ondblclick="playSongById('${s.rel_path}')">🎵</div>
-        <div class="song-info" ondblclick="playSongById('${s.rel_path}')">
+        <div class="song-cover">🎵</div>
+        <div class="song-info">
           <div class="song-name" id="songName_${idSuffix}">${s.name_confident ? '<span class="song-verified" title="✓ 歌名可信">✓</span>' : ''}${escapeHtml(s.name)}</div>
-          ${s.artist ? `<div class="song-artist">${escapeHtml(s.artist)}</div>` : ''}
+          ${s.artist ? `<div class="song-artist" id="songArtist_${idSuffix}">${escapeHtml(s.artist)}</div>` : ''}
           <div class="song-tag">${escapeHtml(s.tag)}</div>
         </div>
-        <div class="song-rating" ondblclick="playSongById('${s.rel_path}')">${stars}</div>
-        <button class="song-play-btn" onclick="event.stopPropagation();playSongById('${s.rel_path}')" title="播放">▶️</button>
-        <div class="song-duration" ondblclick="playSongById('${s.rel_path}')">${s.size_mb}MB</div>
-        <button class="song-rename-btn" onclick="event.stopPropagation();startRename('${s.rel_path}', '${escapeHtml(s.name)}')" title="重命名">✏️</button>
+        <div class="song-rating">${stars}</div>
+        <button class="song-play-btn" data-rel-path="${escapeHtml(s.rel_path)}" title="播放">▶️</button>
+        <div class="song-duration">${s.size_mb}MB</div>
+        <button class="song-rename-btn" data-rel-path="${escapeHtml(s.rel_path)}" title="重命名">✏️</button>
         <div class="song-size"></div>
       </div>
     `;
   }).join('');
+  attachSongListEvents(listEl);
+}
+
+function attachSongListEvents(container) {
+  // Dblclick handlers for song-items: play on double-click
+  container.querySelectorAll('.song-item[data-rel-path]').forEach(el => {
+    const rp = el.dataset.relPath;
+    el.addEventListener('dblclick', () => playSongById(rp));
+    // Right-click context menu
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      showContextMenu(e, rp, el.dataset.songName || '', el.dataset.songArtist || '');
+    });
+  });
+
+  // Play button
+  container.querySelectorAll('.song-play-btn[data-rel-path]').forEach(btn => {
+    btn.addEventListener('click', (e) => { e.stopPropagation(); playSongById(btn.dataset.relPath); });
+  });
+
+  // Rename button
+  container.querySelectorAll('.song-rename-btn[data-rel-path]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const item = btn.closest('.song-item');
+      startRename(btn.dataset.relPath, item ? item.dataset.songName : '', item ? item.dataset.songArtist : '');
+    });
+  });
+
+  // Star rating
+  container.querySelectorAll('.star[data-rel-path]').forEach(star => {
+    star.addEventListener('click', (e) => {
+      e.stopPropagation();
+      rateSong(star.dataset.relPath, parseInt(star.dataset.rating) || 0);
+    });
+  });
+
+  // Review mode: play preview
+  container.querySelectorAll('.song-cover[data-rel-path]').forEach(el => {
+    el.addEventListener('click', () => reviewPlayPreview(el.dataset.relPath));
+  });
+
+  // Review mode: search button
+  container.querySelectorAll('.song-review-search[data-rel-path]').forEach(btn => {
+    btn.addEventListener('click', (e) => { e.stopPropagation(); searchSongCandidate(btn.dataset.relPath, btn.dataset.idSuffix); });
+  });
+
+  // Review mode: shazam button
+  container.querySelectorAll('.song-review-shazam[data-rel-path]').forEach(btn => {
+    btn.addEventListener('click', (e) => { e.stopPropagation(); recognizeSongById(btn.dataset.relPath, btn.dataset.idSuffix); });
+  });
+
+  // Review mode: confirm button
+  container.querySelectorAll('.song-review-confirm[data-rel-path]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const rp = btn.dataset.relPath;
+      const idSuffix = rp.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '_');
+      reviewConfirm(rp, document.getElementById('reviewName_' + idSuffix), document.getElementById('reviewArtist_' + idSuffix));
+    });
+  });
+
+  // Review mode: skip button
+  container.querySelectorAll('.song-review-skip[data-rel-path]').forEach(btn => {
+    btn.addEventListener('click', () => reviewSkipToNext(btn.dataset.relPath));
+  });
 }
 
 // ============================================
 // 歌曲重命名
 // ============================================
-function startRename(relPath, currentName) {
-  // 找到对应的 song-name 元素
+function startRename(relPath, currentName, currentArtist) {
   const song = allSongs.find(s => s.rel_path === relPath);
   if (!song) return;
   
@@ -2598,76 +2758,127 @@ function startRename(relPath, currentName) {
   const nameEl = document.getElementById('songName_' + idSuffix);
   if (!nameEl) return;
   
-  // 替换为输入框，保留原 span 的 id 以便后续恢复
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'song-rename-input';
-  input.id = nameEl.id;
-  input.value = song.name;
-  input.dataset.relPath = relPath;
-  input.dataset.origName = song.name;
+  // ── 歌名输入框 ──
+  const nameInput = document.createElement('input');
+  nameInput.type = 'text';
+  nameInput.className = 'song-rename-input';
+  nameInput.id = nameEl.id;
+  nameInput.value = song.name;
+  nameInput.dataset.relPath = relPath;
+  nameInput.dataset.origName = song.name;
+  nameInput.dataset.inputType = 'name';
+  nameInput.placeholder = '歌曲名';
+  nameEl.replaceWith(nameInput);
   
-  nameEl.replaceWith(input);
-  input.focus();
-  input.select();
+  // ── 歌手输入框 ──
+  const artistEl = document.getElementById('songArtist_' + idSuffix);
+  const artistInput = document.createElement('input');
+  artistInput.type = 'text';
+  artistInput.className = 'song-rename-input song-rename-artist';
+  artistInput.id = 'songArtist_' + idSuffix;
+  artistInput.value = song.artist || '';
+  artistInput.dataset.relPath = relPath;
+  artistInput.dataset.origArtist = song.artist || '';
+  artistInput.dataset.inputType = 'artist';
+  artistInput.placeholder = '歌手（可选）';
   
-  // 回车保存，Esc 取消
-  input.onkeydown = (e) => {
+  if (artistEl) {
+    artistEl.replaceWith(artistInput);
+  } else {
+    // 如果之前没有歌手 div，在 nameInput 后面插入
+    nameInput.insertAdjacentElement('afterend', artistInput);
+  }
+  
+  nameInput.focus();
+  nameInput.select();
+  
+  // 回车/退出统一处理
+  const handleKeydown = (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      finishRename(input);
+      finishRename(nameInput, artistInput);
     } else if (e.key === 'Escape') {
-      cancelRename(input);
+      cancelRename(nameInput, artistInput);
     }
   };
-  input.onblur = () => finishRename(input);
-}
-
-function cancelRename(input) {
-  const origName = input.dataset.origName;
-  replaceInputWithSpan(input, origName);
-}
-
-async function finishRename(input) {
-  const newName = input.value.trim();
-  const relPath = input.dataset.relPath;
-  const origName = input.dataset.origName;
+  nameInput.onkeydown = handleKeydown;
+  artistInput.onkeydown = handleKeydown;
   
-  if (!newName || newName === origName) {
-    cancelRename(input);
+  // 焦点离开时提交（Tab 切换时等一会）
+  nameInput.onblur = () => {
+    setTimeout(() => {
+      if (document.activeElement !== artistInput) finishRename(nameInput, artistInput);
+    }, 150);
+  };
+  artistInput.onblur = () => {
+    setTimeout(() => {
+      if (document.activeElement !== nameInput) finishRename(nameInput, artistInput);
+    }, 150);
+  };
+}
+
+function cancelRename(nameInput, artistInput) {
+  const origName = nameInput.dataset.origName;
+  replaceInputWithSpan(nameInput, origName);
+  replaceArtistWithSpan(artistInput, artistInput.dataset.origArtist);
+}
+
+async function finishRename(nameInput, artistInput) {
+  const newName = (nameInput.value || '').trim();
+  const newArtist = artistInput ? (artistInput.value || '').trim() : '';
+  const relPath = nameInput.dataset.relPath;
+  const origName = nameInput.dataset.origName;
+  const origArtist = artistInput ? (artistInput.dataset.origArtist || '') : '';
+  
+  if (!newName) {
+    showToast('⚠️ 歌名不能为空', 'warning');
+    nameInput.focus();
     return;
   }
   
-  // 禁用输入框，显示保存中
-  input.disabled = true;
-  input.style.opacity = '0.6';
+  const nameChanged = newName !== origName;
+  const artistChanged = newArtist !== origArtist;
+  
+  if (!nameChanged && !artistChanged) {
+    cancelRename(nameInput, artistInput);
+    return;
+  }
+  
+  nameInput.disabled = true;
+  nameInput.style.opacity = '0.6';
+  if (artistInput) { artistInput.disabled = true; artistInput.style.opacity = '0.6'; }
   
   try {
+    const body = { rel_path: relPath, new_name: newName };
+    if (artistChanged) body.artist = newArtist;
+    
     const resp = await fetch(`${API}/api/rename`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rel_path: relPath, new_name: newName })
+      body: JSON.stringify(body)
     });
     const data = await resp.json();
     
     if (data.ok) {
-      // 更新内存中的数据
       const song = allSongs.find(s => s.rel_path === relPath);
-      if (song) song.name = newName;
+      if (song) {
+        song.name = newName;
+        if (artistChanged) song.artist = newArtist;
+      }
       
-      replaceInputWithSpan(input, newName);
-      showToast('✅ 已重命名', 'success');
+      replaceInputWithSpan(nameInput, newName);
+      replaceArtistWithSpan(artistInput, newArtist);
+      showToast('✅ 已更新', 'success');
       
-      // 如果正在播放这个文件，需要更新播放器显示
       if (currentPlayingId === relPath) {
         document.getElementById('nowPlaying').textContent = newName;
       }
     } else {
-      replaceInputWithSpan(input, origName);
+      cancelRename(nameInput, artistInput);
       showToast('❌ 重命名失败: ' + (data.error || '未知错误'), 'error');
     }
   } catch (e) {
-    replaceInputWithSpan(input, origName);
+    cancelRename(nameInput, artistInput);
     showToast('❌ 网络错误', 'error');
   }
 }
@@ -2678,6 +2889,20 @@ function replaceInputWithSpan(input, text) {
   span.className = 'song-name';
   span.id = input.id;
   input.replaceWith(span);
+}
+
+function replaceArtistWithSpan(artistInput, artistText) {
+  if (!artistInput) return;
+  if (artistText) {
+    const div = document.createElement('div');
+    div.className = 'song-artist';
+    div.id = artistInput.id;
+    div.textContent = artistText;
+    artistInput.replaceWith(div);
+  } else {
+    // 歌手为空，移除元素
+    artistInput.remove();
+  }
 }
 
 // ============================================

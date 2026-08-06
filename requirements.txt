@@ -1,0 +1,18 @@
+# MusicFlow — Python 依赖
+# 安装：pip install -r requirements.txt
+
+# 必需
+flask>=2.0
+yt-dlp>=2024.0
+
+# 可选：拼音搜索（中文歌曲搜索用）
+pypinyin>=0.49
+
+# 可选：VLC 播放（需要先装 VLC 应用：brew install --cask vlc）
+python-vlc>=3.0
+
+# 可选：MP3 标签读取（歌名歌手自动识别用）
+mutagen>=1.46
+
+# 可选：Shazam 听歌识曲（需要 ffmpeg：brew install ffmpeg）
+shazamio>=0.5

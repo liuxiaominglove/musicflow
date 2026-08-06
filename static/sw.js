@@ -1,22 +1,37 @@
 // Service Worker for MusicFlow PWA
-// Basic cache-first strategy for app shell
+// Cache-first strategy for app shell with size limit
 
 const CACHE_NAME = 'musicflow-v1';
+const MAX_CACHE_ITEMS = 50;
 
 const PRECACHE_URLS = [
   '/mobile',
   '/manifest.json'
 ];
 
+function trimCache(cache) {
+  return cache.keys().then(keys => {
+    if (keys.length > MAX_CACHE_ITEMS) {
+      return cache.delete(keys[0]).then(() => trimCache(cache));
+    }
+  });
+}
+
+function cachePut(request, response) {
+  return caches.open(CACHE_NAME).then(cache => {
+    return cache.put(request, response).then(() => trimCache(cache));
+  });
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(PRECACHE_URLS);
-    }).catch(() => {
-      // Silently fail - app still works without cache
+      return Promise.allSettled(
+        PRECACHE_URLS.map(url => cache.add(url).catch(() => {}))
+      );
     })
   );
-  self.skipWaiting();
+  // Don't skip waiting — let user close old tabs first
 });
 
 self.addEventListener('activate', (event) => {
@@ -27,7 +42,7 @@ self.addEventListener('activate', (event) => {
       );
     })
   );
-  self.clients.claim();
+  // Don't auto claim — avoid breaking existing tabs
 });
 
 // Network-first for API, cache-first for static assets
@@ -36,18 +51,16 @@ self.addEventListener('fetch', (event) => {
 
   // Don't cache API calls or music streaming
   if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/music/')) {
-    return; // Let browser handle normally
+    return;
   }
 
   // Cache-first for static assets
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       if (cachedResponse) {
-        // Return cached response and update cache in background
         const fetchPromise = fetch(event.request).then((networkResponse) => {
           if (networkResponse.ok) {
-            const cloned = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, cloned));
+            cachePut(event.request, networkResponse.clone());
           }
           return networkResponse;
         }).catch(() => cachedResponse);
@@ -55,8 +68,7 @@ self.addEventListener('fetch', (event) => {
       }
       return fetch(event.request).then((networkResponse) => {
         if (networkResponse.ok) {
-          const cloned = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, cloned));
+          cachePut(event.request, networkResponse.clone());
         }
         return networkResponse;
       });

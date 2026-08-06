@@ -1,5 +1,5 @@
 /**
- * Electron - 智能音乐播放器桌面应用
+ * MusicFlow — 桌面应用主进程
  * Electron 主进程
  */
 
@@ -28,21 +28,19 @@ const RESOURCES_DIR = isPackaged
   : path.join(__dirname, '..');
 
 // DATA_DIR: 可写数据目录（配置、音乐库、日志等）
-//   打包模式: 优先用原项目目录，兜底用用户数据目录
+//   开发模式: 项目根目录
+//   打包模式: 优先用 ~/MusicFlowData（已有数据），新用户兜底用系统标准路径
 function findDataDir() {
   if (!isPackaged) return path.join(__dirname, '..');
-  
-  // 检查常见的项目目录位置
-  const candidates = [
-    path.join(os.homedir(), 'CodeBuddy', '20260728020013', 'smart-music-player'),
-  ];
-  for (const dir of candidates) {
-    if (fs.existsSync(dir)) return dir;
-  }
-  // 兜底：在 ~/MusicFlowData 创建数据目录
-  const fallback = path.join(os.homedir(), 'MusicFlowData');
-  if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true });
-  return fallback;
+
+  // 已有 ~/MusicFlowData 就继续用，不动用户数据
+  const legacyDir = path.join(os.homedir(), 'MusicFlowData');
+  if (fs.existsSync(legacyDir)) return legacyDir;
+
+  // 新安装：用 Electron 标准用户数据目录
+  const dataDir = app.getPath('userData');
+  if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+  return dataDir;
 }
 
 const DATA_DIR = findDataDir();
@@ -67,33 +65,60 @@ safeLog(`[Electron] isPackaged=${isPackaged}, RESOURCES=${RESOURCES_DIR}, DATA=$
 // ============================================
 // Flask 服务器管理
 // ============================================
+let flaskRestartCount = 0;
+
+function findPython() {
+  // 优先 venv
+  const venvPython = process.platform === 'win32'
+    ? path.join(DATA_DIR, 'venv', 'Scripts', 'python.exe')
+    : path.join(DATA_DIR, 'venv', 'bin', 'python3');
+  if (fs.existsSync(venvPython)) return venvPython;
+
+  if (process.platform === 'darwin') {
+    const candidates = [
+      '/usr/local/bin/python3.13',
+      '/usr/local/bin/python3',
+      '/opt/homebrew/bin/python3',
+      '/usr/bin/python3'
+    ];
+    const found = candidates.find(p => fs.existsSync(p));
+    if (found) return found;
+    // 最后兜底：用 which 命令查找
+    try {
+      const which = require('child_process').execSync('which python3', { encoding: 'utf-8' }).trim();
+      if (which && fs.existsSync(which)) return which;
+    } catch (_) {}
+  } else {
+    const cmd = process.platform === 'win32' ? 'where python' : 'which python3';
+    try {
+      const which = require('child_process').execSync(cmd, { encoding: 'utf-8' }).trim().split('\n')[0];
+      if (which && fs.existsSync(which)) return which;
+    } catch (_) {}
+  }
+
+  return null;
+}
+
 function startFlaskServer() {
   return new Promise((resolve, reject) => {
-    // 源代码脚本从 RESOURCES_DIR 找
     const serverScript = path.join(RESOURCES_DIR, 'server.py');
+    const finalPython = findPython();
 
-    // Python 解释器查找：优先使用项目目录的 venv，兜底用系统 python3
-    let finalPython;
-    const venvPython = process.platform === 'win32'
-      ? path.join(DATA_DIR, 'venv', 'Scripts', 'python.exe')
-      : path.join(DATA_DIR, 'venv', 'bin', 'python3');
-    if (fs.existsSync(venvPython)) {
-      finalPython = venvPython;
-    } else if (process.platform === 'darwin') {
-      // macOS: GUI 应用 PATH 不含 /usr/local/bin，需显式指定完整路径
-      const candidates = [
-        '/usr/local/bin/python3.13',
-        '/usr/local/bin/python3',
-        '/usr/bin/python3'
-      ];
-      finalPython = candidates.find(p => fs.existsSync(p)) || 'python3';
-    } else {
-      finalPython = process.platform === 'win32' ? 'python' : 'python3';
+    if (!finalPython) {
+      const msg = process.platform === 'darwin'
+        ? '找不到 Python3。请先安装: brew install python3'
+        : process.platform === 'win32'
+          ? '找不到 Python。请从 python.org 下载安装'
+          : '找不到 Python3。请用包管理器安装 python3';
+      dialog.showErrorBox('缺少 Python', msg);
+      reject(new Error(msg));
+      return;
     }
 
     safeLog(`[Electron] 启动 Flask 服务器，Python: ${finalPython}`);
     safeLog(`[Electron] 脚本: ${serverScript}`);
     safeLog(`[Electron] 端口: ${FLASK_PORT}`);
+    flaskRestartCount = 0;
 
     // 传递 MUSICFLOW_HOME 让 server.py 知道可写数据目录在哪
     const env = {
@@ -161,9 +186,16 @@ function startFlaskServer() {
         return;
       }
 
-      // 运行中意外退出 → 重启
+      // 运行中意外退出 → 重启（最多 3 次）
       if (!isQuitting) {
-        safeLog('[Electron] Flask 意外退出，10秒后重启...');
+        flaskRestartCount++;
+        if (flaskRestartCount > 3) {
+          safeError('[Electron] Flask 反复崩溃，已达最大重试次数');
+          dialog.showErrorBox('服务异常', '播放服务多次崩溃，无法自动恢复。\n\n请检查：\n1. Python 环境是否正常\n2. 在终端运行 python3 server.py 18080 查看报错');
+          app.quit();
+          return;
+        }
+        safeLog(`[Electron] Flask 意外退出，10秒后重启... (第${flaskRestartCount}次)`);
         setTimeout(() => {
           if (!isQuitting) startFlaskServer().catch(safeError);
         }, 10000);
@@ -182,17 +214,42 @@ function startFlaskServer() {
 }
 
 function stopFlaskServer() {
-  if (flaskProcess) {
-    safeLog('[Electron] 停止 Flask 服务器...');
-    // 先移除 close 监听器，避免触发重启逻辑
-    flaskProcess.removeAllListeners('close');
-    if (process.platform === 'win32') {
-      spawn('taskkill', ['/pid', flaskProcess.pid, '/f', '/t']);
-    } else {
-      try { flaskProcess.kill('SIGTERM'); } catch (_) {}
+  if (!flaskProcess) return;
+
+  safeLog('[Electron] 停止 Flask 服务器...');
+  flaskProcess.removeAllListeners('close');
+
+  // 先尝试优雅关闭：发 HTTP 请求让 Flask 自己退出
+  try {
+    const shutdownReq = http.request({
+      hostname: FLASK_HOST,
+      port: FLASK_PORT,
+      path: '/api/shutdown',
+      method: 'POST',
+      timeout: 3000,
+    });
+    shutdownReq.on('error', () => {});
+    shutdownReq.on('timeout', () => { shutdownReq.destroy(); });
+    shutdownReq.end();
+  } catch (_) {}
+
+  // 等待最多 5 秒让 Flask 自己退出，超时则强杀
+  const killTimer = setTimeout(() => {
+    if (flaskProcess) {
+      safeLog('[Electron] Flask 未响应 shutdown，强制终止');
+      if (process.platform === 'win32') {
+        try { spawn('taskkill', ['/pid', String(flaskProcess.pid), '/f', '/t']); } catch (_) {}
+      } else {
+        try { flaskProcess.kill('SIGTERM'); } catch (_) {}
+      }
+      flaskProcess = null;
     }
+  }, 5000);
+
+  flaskProcess.on('close', () => {
+    clearTimeout(killTimer);
     flaskProcess = null;
-  }
+  });
 }
 
 function waitForFlask(maxAttempts = 30) {
@@ -327,7 +384,7 @@ function buildTrayMenu() {
 }
 
   trayContextMenu = buildTrayMenu();
-  tray.setToolTip('MusicFlow - 智能音乐播放器');
+  tray.setToolTip('MusicFlow');
   tray.setContextMenu(trayContextMenu);
 
   tray.on('double-click', () => {
@@ -380,7 +437,7 @@ ipcMain.on('update-tray-song', (_event, name, artist) => {
 
   const tooltip = traySongName
     ? `🎵 ${traySongName}${traySongArtist ? ' - ' + traySongArtist : ''}`
-    : 'MusicFlow - 智能音乐播放器';
+    : 'MusicFlow';
 
   if (tray) {
     tray.setToolTip(tooltip);
@@ -397,8 +454,14 @@ process.on('uncaughtException', (err) => {
     // 终端已关闭，静默处理
     return;
   }
-  safeError('[Electron] 未捕获异常:', err);
-  // 不要 rethrow，让应用继续运行
+  safeError('[Electron] 未捕获异常，应用将退出:', err);
+  dialog.showErrorBox('程序错误', `${err.message}\n\n应用即将退出，请重新打开。`);
+  stopFlaskServer();
+  app.quit();
+});
+
+process.on('unhandledRejection', (reason) => {
+  safeError('[Electron] 未处理的Promise拒绝:', reason);
 });
 
 // ============================================

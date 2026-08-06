@@ -4,30 +4,30 @@
 
 ## 技术栈
 
-- **后端**：Python 3 + Flask（`server.py` + `scheduler.py`）
+- **后端**：Python 3 + Flask（`server.py`）
 - **前端**：原生 HTML/JS/CSS（`static/`）
 - **桌面壳**：Electron（`main.js` + `preload.js`）
-- **视频/音频**：VLC（播放器）、yt-dlp（YouTube 下载）
+- **视频/音频**：VLC（播放器）、yt-dlp（下载）
+- **定时调度**：内置于 server.py（网页 UI 管理，`data/schedule.json`）
 - **端口**：`18080`
 
 ## 目录结构
 
 ```
 musicflow/
-├── server.py          # Flask 后端：搜索、下载、播放 API
-├── scheduler.py       # 定时任务调度器
+├── server.py          # Flask 后端：搜索、下载、播放、定时调度 API
 ├── main.js            # Electron 主进程
 ├── preload.js         # Electron 预加载脚本
 ├── package.json       # Node 项目配置
-├── config.yaml        # 应用配置
-├── current.yaml.template  # 当前播放配置模板
+├── config.yaml        # 旧版定时配置（已废弃，请使用网页 UI 定时功能）
+├── current.yaml.template  # UI 结构快照（非模板文件，请勿修改）
 ├── static/            # 前端页面
 │   ├── index.html     # 主界面
 │   ├── login.html     # 登录页
 │   ├── mobile.html    # 移动端
 │   ├── sw.js          # Service Worker
 │   └── manifest.json  # PWA 配置
-├── songs.json         # 已下载歌曲名称清单
+├── songs.json         # 歌曲名称清单（便于重装后重新搜索下载）
 └── .gitignore
 ```
 

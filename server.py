@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-智能音乐播放器 - Web 服务端
+MusicFlow — Web 服务端
 提供搜索、下载、播放、评分等 API
 """
 
@@ -8,9 +8,32 @@ import os
 import sys
 import re
 import json
+import time
 import secrets
 import hashlib
+import socket
+import threading
+import subprocess
 import functools
+from pathlib import Path
+from datetime import datetime
+
+# ── 修复 macOS Electron 子进程 PATH 缺少 Homebrew 目录的问题 ──
+# Electron 启动的 Python 子进程 PATH 可能只有 /usr/bin:/bin:/usr/sbin:/sbin，
+# 导致 subprocess 找不到 yt-dlp（FileNotFoundError 被静默吞掉，搜索永远 0 条）。
+for _bin in ("/usr/local/bin", "/opt/homebrew/bin"):
+    if os.path.isdir(_bin) and _bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _bin + os.pathsep + os.environ.get("PATH", "")
+
+
+def _log_debug(msg):
+    """写调试日志到 /tmp/mf_search.log（仅排查用，不影响功能）"""
+    try:
+        with open("/tmp/mf_search.log", "a") as _f:
+            _f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}\n")
+    except Exception:
+        pass
+
 try:
     from pypinyin import lazy_pinyin, Style
     _HAS_PYPINYIN = True
@@ -19,15 +42,21 @@ except ImportError:
 
 # ── Upnet VPN 代理配置 ──
 _UPNET_HTTP_PORT = "29758"
-_UPNET_SOCKS_PORT = "29757"
-# yt-dlp 命令行代理参数（最可靠，绕开环境变量兼容问题）
-_PROXY_ARGS = ["--proxy", f"http://127.0.0.1:{_UPNET_HTTP_PORT}"]
-_PROXY_ENV = {
-    **os.environ,
-    "http_proxy": f"http://127.0.0.1:{_UPNET_HTTP_PORT}",
-    "https_proxy": f"http://127.0.0.1:{_UPNET_HTTP_PORT}",
-    "no_proxy": "localhost,127.0.0.1,.local",
-}
+
+
+def _get_proxy():
+    """智能代理检测：Upnet 在线时走代理，否则直连（国内源不需要代理）。"""
+    try:
+        s = socket.create_connection(('127.0.0.1', int(_UPNET_HTTP_PORT)), timeout=1.5)
+        s.close()
+        return (["--proxy", f"http://127.0.0.1:{_UPNET_HTTP_PORT}"], {
+            **os.environ,
+            "http_proxy": f"http://127.0.0.1:{_UPNET_HTTP_PORT}",
+            "https_proxy": f"http://127.0.0.1:{_UPNET_HTTP_PORT}",
+            "no_proxy": "localhost,127.0.0.1,.local",
+        })
+    except Exception:
+        return ([], os.environ)
 
 
 def _to_pinyin(text):
@@ -37,11 +66,48 @@ def _to_pinyin(text):
     if not _HAS_PYPINYIN:
         return text.lower().replace(" ", "")
     return "".join(lazy_pinyin(text, style=Style.NORMAL)).lower().replace(" ", "")
-import time
-import threading
-import subprocess
-from pathlib import Path
-from datetime import datetime
+
+
+def _parse_artist_from_title(title):
+    """从视频标题中智能提取歌手名。
+    支持格式：歌手 - 歌名 | 【歌手】歌名 | 歌手《歌名》 | 歌手 | 歌名 等
+    返回 (artist, clean_title) 元组，解析失败则 artist 为空字符串。
+    """
+    if not title:
+        return "", title
+
+    t = title.strip()
+
+    # 按优先级依次尝试各种分隔格式（左侧 = 歌手，右侧 = 歌名）
+    patterns = [
+        # 1. "歌手 - 歌名" 或 "歌手 – 歌名"（最常见的格式）
+        (r'^(.+?)\s*[-–—]\s*(.+)$', True),
+        # 2. "【歌手】歌名"（B站/中文常见）
+        (r'^【(.+?)】\s*(.+)$', True),
+        # 3. "歌手《歌名》"（中文音乐常见）
+        (r'^(.+?)《(.+?)》\s*$', True),
+        # 4. "歌手「歌名」"
+        (r'^(.+?)「(.+?)」\s*$', True),
+        # 5. "[歌手] 歌名"
+        (r'^\[(.+?)\]\s*(.+)$', True),
+        # 6. "歌手 | 歌名"
+        (r'^(.+?)\s*\|\s*(.+)$', True),
+    ]
+
+    for pattern, left_is_artist in patterns:
+        m = re.match(pattern, t)
+        if m:
+            if left_is_artist:
+                artist = m.group(1).strip()
+                song = m.group(2).strip()
+            else:
+                artist = m.group(2).strip()
+                song = m.group(1).strip()
+            # 歌手名不能太长（排除误匹配，比如一句话被当成歌手）
+            if len(artist) <= 80:
+                return artist, song
+
+    return "", title
 
 from flask import Flask, request, jsonify, send_from_directory, redirect, make_response
 
@@ -65,9 +131,19 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 
 # ============================================
 # 数据目录：打包模式下由 Electron 通过 MUSICFLOW_HOME 指定
-# 开发模式下默认使用 server.py 所在目录（项目根目录）
+# 开发模式下优先检测 ~/MusicFlowData，兜底用源码目录
 # ============================================
-BASE_DIR = Path(os.environ.get("MUSICFLOW_HOME", str(Path(__file__).parent)))
+def _resolve_data_dir():
+    env = os.environ.get("MUSICFLOW_HOME")
+    if env:
+        return Path(env)
+    # 自动检测 ~/MusicFlowData
+    legacy = Path(os.path.expanduser("~/MusicFlowData"))
+    if legacy.is_dir():
+        return legacy
+    return Path(__file__).parent
+
+BASE_DIR = _resolve_data_dir()
 
 # ============================================
 # 安全配置 — 访问密码
@@ -176,8 +252,44 @@ def require_auth_html(f):
 # ============================================
 MUSIC_DIR = BASE_DIR / "music_library"
 RATINGS_FILE = BASE_DIR / "data" / "ratings.json"
+TAGS_ORDER_FILE = BASE_DIR / "data" / "tags_order.json"
 MUSIC_DIR.mkdir(parents=True, exist_ok=True)
 RATINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _load_tag_order() -> list:
+    """读取用户自定义的标签排序（未保存过则返回空列表）"""
+    try:
+        if TAGS_ORDER_FILE.exists():
+            data = json.loads(TAGS_ORDER_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [t for t in data if isinstance(t, str)]
+    except Exception:
+        pass
+    return []
+
+
+def _save_tag_order(order: list):
+    """保存标签排序到配置文件"""
+    TAGS_ORDER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TAGS_ORDER_FILE.write_text(
+        json.dumps([t for t in order if isinstance(t, str)], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _all_tags_with_order() -> list:
+    """返回音乐库全部标签（含空标签），优先应用用户自定义顺序，未排序的标签追加在末尾"""
+    dir_tags = [d.name for d in MUSIC_DIR.iterdir()
+                if d.is_dir() and not d.name.startswith(".")]
+    order = _load_tag_order()
+    # 保留用户在 order 里的有效顺序（过滤掉已不存在的目录）
+    ordered = [t for t in order if t in dir_tags]
+    # 补充 order 里没有但实际存在的目录
+    for t in dir_tags:
+        if t not in ordered:
+            ordered.append(t)
+    return ordered
 
 # ============================================
 # VLC 播放器管理
@@ -474,6 +586,7 @@ schedule_last_triggered = {}
 schedule_thread = None
 schedule_check_running = False
 _schedule_song_active = False  # 标记：当前是否为定时播放触发的歌曲（含暂停状态）
+_restore_stop_event = threading.Event()  # 通知旧的 _restore_loop 线程停止
 
 
 def schedule_checker_loop():
@@ -518,14 +631,17 @@ def schedule_checker_loop():
                         except Exception as e:
                             print(f"[定时播放] VLC 操作异常: {e}")
                             continue
-                        # 后台守护线程：等定时歌曲真正结束（非暂停）后再恢复循环模式
+                        # 通知旧的恢复线程停止，再启动新的
+                        _restore_stop_event.set()
+                        time.sleep(0.2)
+                        _restore_stop_event.clear()
+
                         def _restore_loop():
                             global _schedule_song_active
-                            while True:
+                            while not _restore_stop_event.is_set():
                                 time.sleep(2)
                                 try:
                                     st = player.status()
-                                    # 歌曲真正停止（非暂停、非活跃）时才恢复
                                     if not st.get("active") and not st.get("paused"):
                                         player.set_loop_mode(prev_loop)
                                         _schedule_song_active = False
@@ -826,8 +942,8 @@ def api_library():
         except ValueError:
             pass
 
-    # 收集标签
-    tags = list(set(s["tag"] for s in get_library()))
+    # 收集标签：遍历音乐库所有子目录（含空标签），应用用户自定义排序
+    tags = _all_tags_with_order()
 
     return jsonify({
         "ok": True,
@@ -848,14 +964,15 @@ def api_search():
     results = []
 
     try:
+        proxy_args, proxy_env = _get_proxy()
         cmd = [
             "yt-dlp",
             f"ytsearch{max_results}:{keyword}",
             "--dump-json",
             "--no-playlist",
             "--no-warnings",
-        ] + _PROXY_ARGS
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=_PROXY_ENV)
+        ] + proxy_args
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=proxy_env)
 
         if result.stdout.strip():
             for line in result.stdout.strip().split("\n"):
@@ -938,6 +1055,7 @@ def api_search_all():
             search_query = f"bilisearch{max_online}:{keyword}"
         else:
             search_query = f"ytsearch{max_online}:{keyword}"
+        proxy_args, proxy_env = _get_proxy()
         cmd = [
             "yt-dlp",
             search_query,
@@ -946,29 +1064,42 @@ def api_search_all():
             "--no-warnings",
             "--socket-timeout", "15",
             "--retries", "1",
-        ] + _PROXY_ARGS
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45, env=_PROXY_ENV)
+        ]
+        # bilibili 需要模拟浏览器请求头绕过反爬
+        if source == "bilibili":
+            cmd.extend([
+                "--user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "--add-header", "Referer:https://www.bilibili.com/",
+                "--no-check-certificates",
+            ])
+        cmd.extend(proxy_args)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45, env=proxy_env)
+        _log_debug(
+            f"search source={source} keyword={keyword} rc={proc.returncode} "
+            f"stdout_lines={len([l for l in proc.stdout.splitlines() if l.strip()])} "
+            f"stderr={proc.stderr[:500]!r}"
+        )
 
         if proc.stdout.strip():
             for line in proc.stdout.strip().split("\n"):
                 try:
                     info = json.loads(line)
                     raw_title = info.get("title", "")
-                    # 过滤：如果在线结果的标题在本地已有相似歌曲，标记为 already_local
                     is_already_local = False
                     raw_title_lower = raw_title.lower()
                     for s in all_songs:
                         if s["name"].lower() in raw_title_lower or raw_title_lower in s["name"].lower():
                             is_already_local = True
                             break
-
+                    duration_sec = int(info.get("duration") or 0)
                     online_results.append({
                         "source": "online",
+                        "platform": info.get("extractor_key", ""),
                         "id": info.get("id", ""),
                         "title": raw_title,
                         "url": info.get("webpage_url", ""),
-                        "duration": info.get("duration", 0),
-                        "duration_str": f"{info.get('duration', 0)//60}:{info.get('duration', 0)%60:02d}",
+                        "duration": duration_sec,
+                        "duration_str": f"{duration_sec//60}:{duration_sec%60:02d}",
                         "uploader": info.get("uploader", ""),
                         "thumbnail": info.get("thumbnail", ""),
                         "already_local": is_already_local,
@@ -976,9 +1107,9 @@ def api_search_all():
                 except json.JSONDecodeError:
                     pass
     except subprocess.TimeoutExpired:
-        pass  # 在线搜索超时，只返回本地结果
+        _log_debug(f"search timeout keyword={keyword} source={source}")
     except Exception as e:
-        pass  # 在线搜索失败，只返回本地结果
+        _log_debug(f"search exception keyword={keyword} source={source} err={e!r}")
 
     return jsonify({
         "ok": True,
@@ -994,7 +1125,7 @@ def api_search_all():
 @app.route("/api/download", methods=["POST"])
 @require_admin
 def api_download():
-    """下载歌曲"""
+    """下载歌曲（自动提取歌手/上传者，重命名文件 + 写入 song_meta.json）"""
     data = request.get_json()
     video_id = data.get("video_id", "")
     title = data.get("title", "")
@@ -1004,7 +1135,14 @@ def api_download():
     if not video_id:
         return jsonify({"ok": False, "error": "缺少 video_id"})
 
+    # 安全检查：标签名不能包含路径穿越字符
+    if "/" in tag or "\\" in tag or ".." in tag:
+        return jsonify({"ok": False, "error": "标签名称包含非法字符"})
     tag_dir = MUSIC_DIR / tag
+    try:
+        tag_dir.resolve().relative_to(MUSIC_DIR.resolve())
+    except ValueError:
+        return jsonify({"ok": False, "error": "非法的标签路径"})
     tag_dir.mkdir(parents=True, exist_ok=True)
 
     # 检查是否已存在
@@ -1018,13 +1156,55 @@ def api_download():
             "message": "歌曲已存在",
         })
 
+    proxy_args, proxy_env = _get_proxy()
+
+    # 判断平台：bilibili 的 ID 是 BV 号或 av 号
+    is_bilibili = video_id.startswith("BV") or video_id.startswith("av")
+    if is_bilibili:
+        video_url = f"https://www.bilibili.com/video/{video_id}"
+    else:
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # bilibili 需要模拟浏览器请求头绕过反爬
+    bili_headers = []
+    if is_bilibili:
+        bili_headers = [
+            "--user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "--add-header", "Referer:https://www.bilibili.com/",
+            "--no-check-certificates",
+        ]
+
+    # ── 第一步：用 --dump-json 获取视频标题，再从中解析歌手 ──
+    artist = ""
+    video_title = title
+    try:
+        info_cmd = [
+            "yt-dlp",
+            video_url,
+            "--dump-json",
+            "--no-playlist",
+            "--no-warnings",
+            "--socket-timeout", "15",
+        ] + bili_headers + proxy_args
+        info_result = subprocess.run(info_cmd, capture_output=True, text=True, timeout=30, env=proxy_env)
+        if info_result.stdout.strip():
+            info = json.loads(info_result.stdout.strip().split("\n")[0])
+            video_title = info.get("title", video_title)
+            # 从标题中智能解析歌手（不再用 uploader 兜底）
+            artist, clean_title = _parse_artist_from_title(video_title)
+            if artist:
+                video_title = clean_title  # 用纯歌名替换原标题，避免重复
+    except Exception:
+        pass  # 获取元数据失败不影响下载
+
+    # ── 第二步：下载 ──
     try:
         cmd = [
             "yt-dlp",
-            f"https://www.youtube.com/watch?v={video_id}",
+            video_url,
             "--extract-audio",
             "--audio-format", "mp3",
-        ]
+        ] + bili_headers
         if quality and quality != "best":
             cmd.extend(["--audio-quality", f"{quality}K"])
         cmd.extend([
@@ -1033,17 +1213,38 @@ def api_download():
             "--no-warnings",
             "--restrict-filenames",
         ])
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=_PROXY_ENV)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=proxy_env)
 
         # 查找下载的文件
         mp3_files = sorted(tag_dir.glob("*.mp3"), key=lambda f: f.stat().st_mtime, reverse=True)
         if mp3_files:
             newest = mp3_files[0]
+
+            # ── 第三步：有歌手则重命名为「歌手 - 歌名.mp3」 ──
+            if artist:
+                safe_artist = "".join(c for c in artist if c.isalnum() or c in " _-（）()").strip()
+                safe_name = "".join(c for c in video_title if c.isalnum() or c in " _-（）()").strip()
+                artist_filename = f"{safe_artist} - {safe_name}.mp3"
+                new_path = newest.parent / artist_filename
+                if new_path != newest and not new_path.exists():
+                    try:
+                        newest.rename(new_path)
+                        newest = new_path
+                    except OSError:
+                        pass  # 重命名失败不阻塞
+
+                # ── 写入 song_meta.json ──
+                meta = load_song_meta()
+                rel_path = str(newest.relative_to(MUSIC_DIR))
+                meta[rel_path] = {"name": video_title, "artist": artist}
+                save_song_meta(meta)
+
             return jsonify({
                 "ok": True,
                 "path": str(newest),
                 "name": newest.stem,
                 "size_mb": round(newest.stat().st_size / (1024 * 1024), 1),
+                "artist": artist,
             })
 
         return jsonify({"ok": False, "error": "下载失败，请检查网络"})
@@ -1113,25 +1314,28 @@ def api_volume():
 @app.route("/api/rename", methods=["POST"])
 @require_admin
 def api_rename():
-    """重命名歌曲文件"""
+    """重命名歌曲文件 + 可选更新歌手"""
     data = request.get_json()
     rel_path = data.get("rel_path", "")
     new_name = data.get("new_name", "").strip()
+    artist = data.get("artist")  # 新增：可选歌手字段
     
     if not rel_path or not new_name:
         return jsonify({"ok": False, "error": "缺少参数"})
     
     old_path = MUSIC_DIR / rel_path
+    # 安全检查：确保文件在音乐目录内
+    try:
+        old_path.resolve().relative_to(MUSIC_DIR.resolve())
+    except ValueError:
+        return jsonify({"ok": False, "error": "非法的文件路径"})
     if not old_path.exists():
         return jsonify({"ok": False, "error": "文件不存在"})
     
     # 保持后缀名
     suffix = old_path.suffix
-    new_filename = new_name + suffix
-    new_path = old_path.parent / new_filename
-    
     # 清理非法字符
-    new_filename = re.sub(r'[\\/:*?"<>|]', '_', new_filename)
+    new_filename = re.sub(r'[\\/:*?"<>|]', '_', new_name) + suffix
     new_path = old_path.parent / new_filename
     
     if new_path.exists() and new_path != old_path:
@@ -1139,10 +1343,21 @@ def api_rename():
     
     try:
         old_path.rename(new_path)
-        # 清空歌曲缓存
-        global library_cache
-        library_cache = None
-        return jsonify({"ok": True, "new_name": new_name, "new_filename": new_filename})
+        
+        # 如果传了 artist，同步更新 song_meta.json
+        artist_val = ""
+        if artist is not None:
+            artist_val = artist.strip()
+            meta = load_song_meta()
+            meta[rel_path] = {"name": new_name, "artist": artist_val}
+            save_song_meta(meta)
+        
+        return jsonify({
+            "ok": True,
+            "new_name": new_name,
+            "new_filename": new_filename,
+            "artist": artist_val,
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -1162,6 +1377,10 @@ def api_update_song():
         return jsonify({"ok": False, "error": "歌名不能为空"})
 
     old_path = MUSIC_DIR / rel_path
+    try:
+        old_path.resolve().relative_to(MUSIC_DIR.resolve())
+    except ValueError:
+        return jsonify({"ok": False, "error": "非法的文件路径"})
     if not old_path.exists():
         return jsonify({"ok": False, "error": "文件不存在"})
 
@@ -1210,7 +1429,7 @@ def api_search_song():
 
     # 调用网易云音乐搜索 API
     try:
-        url = ("http://music.163.com/api/search/get?"
+        url = ("https://music.163.com/api/search/get?"
                f"csrf_token=&s={urllib.parse.quote(query)}&type=1&limit=6&offset=0")
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -1549,13 +1768,33 @@ def api_rate():
 @app.route("/api/tags")
 @require_auth
 def api_tags():
-    """获取所有标签"""
-    tags = set()
-    for d in MUSIC_DIR.iterdir():
-        if d.is_dir() and not d.name.startswith("."):
-            if list(d.glob("*.mp3")):
-                tags.add(d.name)
-    return jsonify({"ok": True, "tags": sorted(tags)})
+    """获取所有标签（含空标签，应用用户自定义排序）"""
+    tags = _all_tags_with_order()
+    return jsonify({"ok": True, "tags": tags})
+
+
+@app.route("/api/tags/order", methods=["GET"])
+@require_auth
+def api_tags_order_get():
+    """获取用户保存的标签排序"""
+    return jsonify({"ok": True, "order": _load_tag_order()})
+
+
+@app.route("/api/tags/order", methods=["POST"])
+@require_admin
+def api_tags_order_set():
+    """保存用户拖拽后的标签排序"""
+    data = request.get_json() or {}
+    order = data.get("order", [])
+    if not isinstance(order, list):
+        return jsonify({"ok": False, "error": "参数必须是数组"})
+    # 安全检查：过滤非法字符，防止路径遍历
+    valid = []
+    for t in order:
+        if isinstance(t, str) and t and "/" not in t and "\\" not in t and ".." not in t:
+            valid.append(t)
+    _save_tag_order(valid)
+    return jsonify({"ok": True, "order": valid})
 
 
 @app.route("/api/tag/create", methods=["POST"])
@@ -1663,8 +1902,12 @@ def api_schedule_add():
     except ValueError:
         return jsonify({"ok": False, "error": "时间格式错误，请使用 HH:MM"})
 
-    # 验证文件存在
-    full_path = MUSIC_DIR / song_path
+    # 验证文件存在且路径安全
+    full_path = (MUSIC_DIR / song_path).resolve()
+    try:
+        full_path.relative_to(MUSIC_DIR.resolve())
+    except ValueError:
+        return jsonify({"ok": False, "error": "非法的文件路径"})
     if not full_path.exists():
         return jsonify({"ok": False, "error": f"文件不存在: {song_path}"})
 
@@ -1708,7 +1951,15 @@ def api_schedule_update(item_id):
                 except ValueError:
                     return jsonify({"ok": False, "error": "时间格式错误"})
             if "song_path" in req:
-                item["song_path"] = req["song_path"]
+                sp = req["song_path"].strip()
+                fp = (MUSIC_DIR / sp).resolve()
+                try:
+                    fp.relative_to(MUSIC_DIR.resolve())
+                except ValueError:
+                    return jsonify({"ok": False, "error": "非法的文件路径"})
+                if not fp.exists():
+                    return jsonify({"ok": False, "error": f"文件不存在: {sp}"})
+                item["song_path"] = sp
             if "song_name" in req:
                 item["song_name"] = req["song_name"]
             if "volume" in req:
@@ -1751,6 +2002,33 @@ def serve_music(filename):
     _last_status_poll = time.time()  # 流媒体传输也算活跃，防止空闲关闭
     return send_from_directory(MUSIC_DIR, filename)
 
+
+# ============================================
+# 后台歌曲结束事件轮询
+# 独立于 API 状态轮询，确保无人访问网页时也能自动切歌
+# ============================================
+_song_end_polling = False
+
+def _song_end_poller():
+    global _song_end_polling
+    while _song_end_polling:
+        try:
+            player.status()
+        except Exception:
+            pass
+        time.sleep(2)
+
+def start_song_end_poller():
+    global _song_end_polling
+    if _song_end_polling:
+        return
+    _song_end_polling = True
+    threading.Thread(target=_song_end_poller, daemon=True).start()
+
+def stop_song_end_poller():
+    global _song_end_polling
+    _song_end_polling = False
+
 # ============================================
 # 启动
 # ============================================
@@ -1778,7 +2056,7 @@ if __name__ == "__main__":
 
     print(f"""
 ╔══════════════════════════════════════════════════╗
-║       🎵 智能音乐播放器 Web 服务                ║
+║       🎵 MusicFlow Web 服务                    ║
 ║                                                  ║
 ║  电脑访问:     http://localhost:{port}              ║
 ║  手机访问:     http://{local_ip}:{port}           ║
@@ -1795,6 +2073,8 @@ if __name__ == "__main__":
         start_schedule_checker()
     else:
         print("[定时播放] 已通过 --no-schedule 禁用定时调度器")
+    # 启动歌曲结束事件轮询（确保无人访问网页时也能自动切歌）
+    start_song_end_poller()
     # 启动空闲监控（无浏览器连接时自动退出）
     _idle_thread = threading.Thread(target=_idle_monitor, daemon=True)
     _idle_thread.start()
@@ -1802,6 +2082,7 @@ if __name__ == "__main__":
     import signal as _signal
     def _graceful_shutdown(signum, frame):
         print("\n[服务器] 收到关闭信号，正在清理...")
+        stop_song_end_poller()
         if not no_schedule:
             stop_schedule_checker()
         sys.exit(0)
@@ -1809,5 +2090,6 @@ if __name__ == "__main__":
     try:
         app.run(host="0.0.0.0", port=port, debug=False)
     finally:
+        stop_song_end_poller()
         if not no_schedule:
             stop_schedule_checker()

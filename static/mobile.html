@@ -957,11 +957,14 @@ async function loadLibrary() {
 // ============================================
 function renderTagChips(tags) {
   const container = document.getElementById('tagChips');
-  let html = `<span class="tag-chip ${currentTag === '' ? 'active' : ''}" onclick="filterByTag('')">全部</span>`;
+  let html = `<span class="tag-chip ${currentTag === '' ? 'active' : ''}" data-tag="">全部</span>`;
   for (const t of tags) {
-    html += `<span class="tag-chip ${currentTag === t ? 'active' : ''}" onclick="filterByTag('${escapeHtml(t)}')">${escapeHtml(t)}</span>`;
+    html += `<span class="tag-chip ${currentTag === t ? 'active' : ''}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</span>`;
   }
   container.innerHTML = html;
+  container.querySelectorAll('.tag-chip').forEach(el => {
+    el.addEventListener('click', () => filterByTag(el.dataset.tag));
+  });
 }
 
 function filterByTag(tag) {
@@ -995,7 +998,7 @@ function renderSongList() {
     const tag = s.tag || '';
 
     html += `
-    <div class="${cls}" onclick="playSongByRelPath('${escapeAttr(s.rel_path)}')">
+    <div class="${cls}" data-rel-path="${escapeHtml(s.rel_path)}">
       ${isNow ? '<div class="now-playing-indicator"></div>' : `<span class="song-index">${i + 1}</span>`}
       <div class="song-cover">${emoji}</div>
       <div class="song-info">
@@ -1005,6 +1008,10 @@ function renderSongList() {
     </div>`;
   });
   container.innerHTML = html;
+  container.querySelectorAll('.song-item').forEach(el => {
+    const rp = el.dataset.relPath;
+    if (rp) el.addEventListener('click', () => playSongByRelPath(rp));
+  });
 }
 
 function playSongByRelPath(relPath) {
@@ -1061,7 +1068,7 @@ function renderSearchResults(results) {
     const isNow = r.rel_path === currentRelPath;
     const cls = isNow ? 'song-item now-playing-item' : 'song-item';
     html += `
-    <div class="${cls}" onclick="playSongFromSearch('${escapeAttr(r.rel_path)}', '${escapeAttr(r.title)}')">
+    <div class="${cls}" data-rel-path="${escapeHtml(r.rel_path)}" data-title="${escapeHtml(r.title)}">
       ${isNow ? '<div class="now-playing-indicator"></div>' : `<span class="song-index">${i + 1}</span>`}
       <div class="song-cover">🎵</div>
       <div class="song-info">
@@ -1070,7 +1077,12 @@ function renderSearchResults(results) {
       </div>
     </div>`;
   });
-  document.getElementById('searchResults').innerHTML = html;
+  const container = document.getElementById('searchResults');
+  container.innerHTML = html;
+  container.querySelectorAll('.song-item').forEach(el => {
+    const rp = el.dataset.relPath;
+    if (rp) el.addEventListener('click', () => playSongFromSearch(rp, el.dataset.title));
+  });
 }
 
 function playSongFromSearch(relPath, title) {
@@ -1100,7 +1112,7 @@ function renderFavList() {
     const cls = isNow ? 'song-item now-playing-item' : 'song-item';
     const artist = s.artist || '';
     html += `
-    <div class="${cls}" onclick="playFav('${escapeAttr(s.rel_path)}', ${i})">
+    <div class="${cls}" data-rel-path="${escapeHtml(s.rel_path)}" data-idx="${i}">
       ${isNow ? '<div class="now-playing-indicator"></div>' : `<span class="song-index">${i + 1}</span>`}
       <div class="song-cover">⭐</div>
       <div class="song-info">
@@ -1110,6 +1122,10 @@ function renderFavList() {
     </div>`;
   });
   container.innerHTML = html;
+  container.querySelectorAll('.song-item').forEach(el => {
+    const rp = el.dataset.relPath;
+    if (rp) el.addEventListener('click', () => playFav(rp, parseInt(el.dataset.idx) || 0));
+  });
 
   // Store favs as queue for playback
   window._favQueue = favs;
@@ -1155,11 +1171,6 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
-}
-
-function escapeAttr(str) {
-  if (!str) return '';
-  return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function hashCode(str) {
